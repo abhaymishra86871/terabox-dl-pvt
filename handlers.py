@@ -21,7 +21,12 @@ async def start_cmd(client, message):
 
 
 async def status_cmd(client, message):
-    await message.reply_text(f"📋 Jobs waiting in queue: {await queue_length()}")
+    try:
+        n = await queue_length()
+    except Exception as e:  # noqa: BLE001
+        await message.reply_text(f"❌ Cannot reach Redis: {e}")
+        return
+    await message.reply_text(f"📋 Jobs waiting in queue: {n}")
 
 
 async def link_handler(client, message):
@@ -31,7 +36,11 @@ async def link_handler(client, message):
         return
     for link in links:
         status = await message.reply_text("⏳ Added to queue...")
-        pos = await enqueue(message.chat.id, status.id, link)
+        try:
+            pos = await enqueue(message.chat.id, status.id, link)
+        except Exception as e:  # noqa: BLE001
+            await status.edit_text(f"❌ Cannot reach Redis, so the job was not queued.\n{e}")
+            continue
         if pos > 1:
             await status.edit_text(f"⏳ In queue (position {pos})")
 
