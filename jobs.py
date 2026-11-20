@@ -17,7 +17,13 @@ QUEUE = "terabox:queue"
 CURRENT = "terabox:current"
 VIDEO_EXT = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"}
 
-r = aioredis.from_url(REDIS_URL, decode_responses=True)
+r = aioredis.from_url(
+    REDIS_URL,
+    decode_responses=True,
+    socket_connect_timeout=10,
+    socket_timeout=20,
+    health_check_interval=30,
+)
 wake = asyncio.Event()
 
 
@@ -64,6 +70,10 @@ async def enqueue(chat_id, msg_id, url):
 
 async def queue_length():
     return await r.llen(QUEUE)
+
+
+async def check_redis():
+    await r.ping()
 
 
 async def process(app, job):
@@ -126,7 +136,7 @@ async def process(app, job):
         pass
 
 
-async def worker(app):
+async def _worker_loop(app):
     # A job that was running when the server restarted is lost: tell the owner.
     stale = await r.get(CURRENT)
     if stale:
@@ -155,3 +165,13 @@ async def worker(app):
                 log.exception("worker error")
             finally:
                 await r.delete(CURRENT)
+
+
+async def worker(app):
+    """Runs the worker forever: if anything fails (e.g. Redis), log it and try again."""
+    while True:
+        try:
+            await _worker_loop(app)
+        except Exception:  # noqa: BLE001
+            log.exception("Worker crashed, restarting in 10 seconds")
+            await asyncio.sleep(10)
