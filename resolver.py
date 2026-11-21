@@ -141,7 +141,8 @@ class _Terabox:
     def __init__(self, host, session):
         self.base = f"https://{host}"
         self.s = session
-        self.cookies = _parse_cookie(TERABOX_COOKIE)
+        self.user_cookies = _parse_cookie(TERABOX_COOKIE)
+        self.cookies = dict(self.user_cookies)
 
     def headers(self):
         h = {"User-Agent": UA, "Referer": self.base + "/", "Accept": "application/json, text/plain, */*"}
@@ -152,7 +153,8 @@ class _Terabox:
     async def get(self, path, params=None):
         async with self.s.get(self.base + path, params=params, headers=self.headers()) as r:
             for k, c in r.cookies.items():
-                self.cookies[k] = c.value
+                if k not in self.user_cookies:  # keep YOUR login cookie, never let a guest one replace it
+                    self.cookies[k] = c.value
             return r.status, await r.text()
 
     async def get_json(self, path, params=None):
@@ -173,10 +175,24 @@ def _why(data):
 async def _account_status(tb, common):
     if not tb.cookies.get("ndus"):
         return "no ndus cookie is being sent (TERABOX_COOKIE empty or wrong format)"
-    data = await tb.get_json("/api/home/info", common)
-    if data.get("errno") == 0:
-        return "Terabox accepts the cookie (logged in)"
-    return f"Terabox does NOT accept the cookie: {_why(data)}"
+    params = dict(common)
+    try:
+        _, html = await tb.get("/main", {"category": "all"})
+        token = _find_token(html)
+        if token:
+            params["jsToken"] = token
+    except Exception:  # noqa: BLE001
+        pass
+    params.update({"dir": "/", "num": "1", "page": "1", "order": "time", "desc": "1"})
+    data = await tb.get_json("/api/list", params)
+    errno = data.get("errno")
+    if errno == 0:
+        return "✅ logged in: Terabox accepts the cookie"
+    if errno == "not-json":
+        return f"⚠️ inconclusive: the check got a web page instead of data ({data.get('errmsg')})"
+    if errno in (-6, 4000023):
+        return f"❌ Terabox says NOT logged in: the cookie is rejected (errno {errno})"
+    return f"⚠️ unclear answer from Terabox: {_why(data)}"
 
 
 async def check_cookie():
