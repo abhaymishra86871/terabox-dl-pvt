@@ -9,7 +9,7 @@ Every step writes a short note, so when it fails the bot tells you exactly where
 import json
 import re
 from dataclasses import dataclass, field
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import aiohttp
 
@@ -30,6 +30,7 @@ ERRNO_HINTS = {
     -6: "Terabox says you are not logged in (cookie missing, wrong or expired)",
     -7: "This share was cancelled or you have no access",
     105: "Link is invalid or expired",
+    2: "Terabox refused the request (most often: the login cookie is missing, wrong, expired or cut short)",
 }
 
 
@@ -169,6 +170,31 @@ def _why(data):
     return f"errno {errno}: {hint or extra or 'unknown'}"
 
 
+async def _account_status(tb, common):
+    if not tb.cookies.get("ndus"):
+        return "no ndus cookie is being sent (TERABOX_COOKIE empty or wrong format)"
+    data = await tb.get_json("/api/home/info", common)
+    if data.get("errno") == 0:
+        return "Terabox accepts the cookie (logged in)"
+    return f"Terabox does NOT accept the cookie: {_why(data)}"
+
+
+async def check_cookie():
+    """Used by the /check command: tells you if the cookie in Render works."""
+    if not TERABOX_COOKIE:
+        return "❌ TERABOX_COOKIE is not set in Render."
+    ck = _parse_cookie(TERABOX_COOKIE)
+    ndus = ck.get("ndus", "")
+    if not ndus:
+        return f"❌ No 'ndus' value found. Cookie names seen: {', '.join(ck) or 'none'}"
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(timeout=timeout, cookie_jar=aiohttp.DummyCookieJar()) as s:
+        tb = _Terabox("www.terabox.com", s)
+        common = {"app_id": APP_ID, "web": "1", "channel": "dubox", "clienttype": "0"}
+        status = await _account_status(tb, common)
+    return f"Cookie length: {len(ndus)} characters\nResult: {status}"
+
+
 async def _list_dir(tb, common, short, path):
     params = {**common, "shorturl": short, "dir": path, "root": "0", "page": "1", "num": "100", "order": "asc"}
     data = await tb.get_json("/share/list", params)
@@ -238,23 +264,35 @@ async def _scrape_host(host, full, short, trace):
             if not dl and meta.get("sign") and f.get("fs_id"):
                 params = {
                     **common,
+                    "encrypt": "0",
+                    "product": "share",
                     "sign": meta["sign"],
                     "timestamp": meta.get("timestamp", ""),
                     "shareid": meta.get("shareid", ""),
+                    "primaryid": meta.get("shareid", ""),
                     "uk": meta.get("uk", ""),
-                    "product": "share",
                     "nozip": "0",
                     "fid_list": json.dumps([_to_int(f["fs_id"])]),
                 }
+                if meta.get("randsk"):
+                    params["extra"] = json.dumps({"sekey": unquote(str(meta["randsk"]))}, separators=(",", ":"))
                 d = await tb.get_json("/share/download", params)
                 if d.get("errno") == 0:
-                    dl = d.get("dlink") or _pick(d, ["download_link"])
+                    dl = d.get("dlink")
+                    if isinstance(dl, list):
+                        dl = dl[0].get("dlink") if dl and isinstance(dl[0], dict) else None
+                    if not dl:
+                        items = d.get("list") or d.get("info") or []
+                        if items and isinstance(items[0], dict):
+                            dl = items[0].get("dlink")
                 else:
                     trace.append(f"{host} share/download -> {_why(d)}")
             if not dl:
                 trace.append(f"{host}: found '{name}' ({_to_int(f.get('size'))} bytes) but Terabox gave no download link")
                 continue
             out.append(FileInfo(name, _to_int(f.get("size")), dl, tb.headers()))
+        if not out and not any("account check" in t for t in trace):
+            trace.append(f"{host} account check -> {await _account_status(tb, common)}")
         return out
 
 
