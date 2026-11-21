@@ -96,10 +96,14 @@ async def process(app, job):
 
         path = os.path.join(DOWNLOAD_DIR, f"{int(time.time())}_{name}")
         try:
+            t0 = time.monotonic()
+
             async def dl_progress(done, total):
+                speed = done / max(time.monotonic() - t0, 0.1)
                 text = f"⬇️ {label}Downloading\n{name}\n{fmt_size(done)}"
                 if total:
                     text += f" / {fmt_size(total)}\n{bar(done, total)}"
+                text += f"\n🚀 {fmt_size(speed)}/s"
                 await status.set(text)
 
             await download(info, path, dl_progress)
