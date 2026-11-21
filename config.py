@@ -26,3 +26,6 @@ DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "/tmp/downloads")
 RESOLVER_API_URL = os.getenv("RESOLVER_API_URL", "")
 # Optional: your Terabox login cookie (the "ndus" value) for the built-in scraper
 TERABOX_COOKIE = os.getenv("TERABOX_COOKIE", "")
+
+# Optional: the Terabox site your cookie belongs to, e.g. www.1024terabox.com (it is tried first)
+TERABOX_HOST = os.getenv("TERABOX_HOST", "").strip()
