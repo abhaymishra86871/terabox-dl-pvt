@@ -2,3 +2,4 @@ kurigram
 tgcrypto
 aiohttp
 redis
+curl_cffi
