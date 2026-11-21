@@ -142,7 +142,8 @@ async def _worker_loop(app):
     if stale:
         await r.delete(CURRENT)
         try:
-            await app.send_message(OWNER_ID, f"⚠️ The server restarted during a job. Please resend:\n{json.loads(stale)['url']}")
+            old = json.loads(stale)
+            await app.send_message(old["chat_id"], f"⚠️ The server restarted during a job. Please resend:\n{old['url']}")
         except Exception:  # noqa: BLE001
             pass
 
