@@ -10,7 +10,13 @@ async def download(info, path, on_progress):
     async with aiohttp.ClientSession(headers=info.headers, timeout=timeout) as s:
         async with s.get(info.url, allow_redirects=True) as r:
             if r.status != 200:
-                raise RuntimeError(f"Download failed (HTTP {r.status})")
+                hint = {
+                    401: "not logged in",
+                    403: "Terabox refused it: link expired or this server's IP is blocked",
+                    404: "file not found / link expired",
+                    429: "too many requests, try later",
+                }.get(r.status, "unexpected answer from the download server")
+                raise RuntimeError(f"Download failed (HTTP {r.status}: {hint})")
             if "text/html" in r.headers.get("Content-Type", ""):
                 raise RuntimeError("Download link returned a web page instead of a file (link expired?)")
 
