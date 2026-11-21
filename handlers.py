@@ -5,6 +5,7 @@ from pyrogram.handlers import MessageHandler
 
 from config import OWNER_ID
 from jobs import enqueue, queue_length
+from resolver import check_cookie
 
 DOMAINS = (
     r"terabox\.com|1024terabox\.com|teraboxapp\.com|teraboxlink\.com|terasharelink\.com|"
@@ -17,7 +18,7 @@ owner_only = filters.user(OWNER_ID)
 
 
 async def start_cmd(client, message):
-    await message.reply_text("👋 Send me a Terabox link and I'll send you the video.\n\n/status - queue length")
+    await message.reply_text("👋 Send me a Terabox link and I'll send you the video.\n\n/status - queue length\n/check - test the Terabox cookie")
 
 
 async def status_cmd(client, message):
@@ -27,6 +28,13 @@ async def status_cmd(client, message):
         await message.reply_text(f"❌ Cannot reach Redis: {e}")
         return
     await message.reply_text(f"📋 Jobs waiting in queue: {n}")
+
+
+async def check_cmd(client, message):
+    try:
+        await message.reply_text(await check_cookie())
+    except Exception as e:  # noqa: BLE001
+        await message.reply_text(f"❌ Check failed: {type(e).__name__}: {e}")
 
 
 async def link_handler(client, message):
@@ -48,4 +56,5 @@ async def link_handler(client, message):
 def register(app):
     app.add_handler(MessageHandler(start_cmd, owner_only & filters.command(["start", "help"])))
     app.add_handler(MessageHandler(status_cmd, owner_only & filters.command("status")))
-    app.add_handler(MessageHandler(link_handler, owner_only & filters.text & ~filters.command(["start", "help", "status"])))
+    app.add_handler(MessageHandler(check_cmd, owner_only & filters.command("check")))
+    app.add_handler(MessageHandler(link_handler, owner_only & filters.text & ~filters.command(["start", "help", "status", "check"])))
