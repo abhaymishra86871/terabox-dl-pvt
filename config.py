@@ -11,7 +11,9 @@ def _req(name):
 API_ID = int(_req("API_ID"))
 API_HASH = _req("API_HASH")
 BOT_TOKEN = _req("BOT_TOKEN")
-OWNER_ID = int(_req("OWNER_ID"))
+# One or more Telegram user IDs, separated by commas, e.g. 123456789,987654321
+OWNER_IDS = [int(x) for x in _req("OWNER_ID").replace(" ", "").split(",") if x]
+OWNER_ID = OWNER_IDS[0]  # the first one also receives the startup message
 REDIS_URL = _req("REDIS_URL")
 
 # 0 = no limit (the server may crash on very big files and Render will restart it)
