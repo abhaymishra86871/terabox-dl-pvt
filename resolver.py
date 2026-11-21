@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import aiohttp
+from curl_cffi.requests import AsyncSession
 
 from config import RESOLVER_API_URL, TERABOX_COOKIE, TERABOX_HOST
 
@@ -22,7 +23,7 @@ UA = (
 APP_ID = "250528"
 # A cookie only works on the site it was created on, so the site matters.
 # Your cookie is from 1024terabox.com, so that one goes first.
-_DEFAULT_HOSTS = ["www.1024terabox.com", "www.terabox.com", "www.terabox.app"]
+_DEFAULT_HOSTS = ["www.1024terabox.com", "www.terabox.com", "www.terabox.app", "dm.terabox.com"]
 HOSTS = list(dict.fromkeys(([TERABOX_HOST] if TERABOX_HOST else []) + _DEFAULT_HOSTS))
 
 ERRNO_HINTS = {
@@ -140,25 +141,37 @@ def _parse_cookie(raw):
     return out
 
 
+IMPERSONATE = "chrome124"  # makes our requests look like a real Chrome browser to Terabox's firewall
+
+
 class _Terabox:
-    def __init__(self, host, session):
+    def __init__(self, host):
         self.base = f"https://{host}"
-        self.s = session
         self.user_cookies = _parse_cookie(TERABOX_COOKIE)
         self.cookies = dict(self.user_cookies)
 
-    def headers(self):
-        h = {"User-Agent": UA, "Referer": self.base + "/", "Accept": "application/json, text/plain, */*"}
+    def _cookie_header(self):
+        return "; ".join(f"{k}={v}" for k, v in self.cookies.items())
+
+    def headers(self, with_ua=False):
+        h = {"Referer": self.base + "/", "Accept": "application/json, text/plain, */*"}
         if self.cookies:
-            h["Cookie"] = "; ".join(f"{k}={v}" for k, v in self.cookies.items())
+            h["Cookie"] = self._cookie_header()
+        if with_ua:
+            h["User-Agent"] = UA
         return h
 
     async def get(self, path, params=None):
-        async with self.s.get(self.base + path, params=params, headers=self.headers()) as r:
-            for k, c in r.cookies.items():
-                if k not in self.user_cookies:  # keep YOUR login cookie, never let a guest one replace it
-                    self.cookies[k] = c.value
-            return r.status, await r.text()
+        # a fresh session per request, so only OUR cookie header is sent (no duplicate guest cookies)
+        async with AsyncSession(impersonate=IMPERSONATE, timeout=30) as s:
+            r = await s.get(self.base + path, params=params, headers=self.headers())
+            try:
+                for k, v in r.cookies.items():
+                    if k not in self.user_cookies:  # keep YOUR login cookie, never let a guest one replace it
+                        self.cookies[k] = v
+            except Exception:  # noqa: BLE001
+                pass
+            return r.status_code, r.text
 
     async def get_json(self, path, params=None):
         status, text = await self.get(path, params)
@@ -186,8 +199,8 @@ async def _account_status(tb, common):
             params["jsToken"] = token
     except Exception:  # noqa: BLE001
         pass
-    params.update({"dir": "/", "num": "1", "page": "1", "order": "time", "desc": "1"})
-    data = await tb.get_json("/api/list", params)
+    params.update({"checkfree": "1", "checkexpire": "1"})
+    data = await tb.get_json("/api/quota", params)
     errno = data.get("errno")
     if errno == 0:
         return "✅ logged in: Terabox accepts the cookie"
@@ -210,9 +223,7 @@ async def check_cookie():
     common = {"app_id": APP_ID, "web": "1", "channel": "dubox", "clienttype": "0"}
     for host in HOSTS:
         try:
-            timeout = aiohttp.ClientTimeout(total=25)
-            async with aiohttp.ClientSession(timeout=timeout, cookie_jar=aiohttp.DummyCookieJar()) as s:
-                status = await _account_status(_Terabox(host, s), common)
+            status = await _account_status(_Terabox(host), common)
         except Exception as e:  # noqa: BLE001
             status = f"⚠️ {type(e).__name__}: {e}"
         lines.append(f"{host}: {status}")
@@ -226,98 +237,96 @@ async def _list_dir(tb, common, short, path):
 
 
 async def _scrape_host(host, full, short, trace):
-    timeout = aiohttp.ClientTimeout(total=45)
-    async with aiohttp.ClientSession(timeout=timeout, cookie_jar=aiohttp.DummyCookieJar()) as s:
-        tb = _Terabox(host, s)
+    tb = _Terabox(host)
 
-        # 1) jsToken from the site
-        token = ""
-        for path, params in (("/main", {"category": "all"}), ("/sharing/link", {"surl": short})):
-            try:
-                _, html = await tb.get(path, params)
-                token = _find_token(html)
-            except Exception as e:  # noqa: BLE001
-                trace.append(f"{host} {path}: {type(e).__name__}: {e}")
-            if token:
-                break
-        if not token:
-            trace.append(f"{host}: no jsToken found (continuing without it)")
-
-        common = {"app_id": APP_ID, "web": "1", "channel": "dubox", "clienttype": "0"}
+    # 1) jsToken from the site
+    token = ""
+    for path, params in (("/main", {"category": "all"}), ("/sharing/link", {"surl": short})):
+        try:
+            _, html = await tb.get(path, params)
+            token = _find_token(html)
+        except Exception as e:  # noqa: BLE001
+            trace.append(f"{host} {path}: {type(e).__name__}: {e}")
         if token:
-            common["jsToken"] = token
+            break
+    if not token:
+        trace.append(f"{host}: no jsToken found (continuing without it)")
 
-        # 2) share info
-        info = await tb.get_json("/api/shorturlinfo", {**common, "shorturl": full, "root": "1"})
-        files, meta = [], {}
-        if info.get("errno") == 0:
-            files = info.get("list") or []
-            meta = {k: info.get(k) for k in ("shareid", "uk", "sign", "timestamp", "randsk") if info.get(k)}
+    common = {"app_id": APP_ID, "web": "1", "channel": "dubox", "clienttype": "0"}
+    if token:
+        common["jsToken"] = token
+
+    # 2) share info
+    info = await tb.get_json("/api/shorturlinfo", {**common, "shorturl": full, "root": "1"})
+    files, meta = [], {}
+    if info.get("errno") == 0:
+        files = info.get("list") or []
+        meta = {k: info.get(k) for k in ("shareid", "uk", "sign", "timestamp", "randsk") if info.get(k)}
+    else:
+        trace.append(f"{host} shorturlinfo -> {_why(info)}")
+
+    # 3) share list (signed if we have the info, anonymous otherwise)
+    if not any(f.get("dlink") for f in files):
+        params = {**common, "shorturl": short, "root": "1", "page": "1", "num": "100", "order": "asc"}
+        for k in ("shareid", "uk", "sign", "timestamp"):
+            if meta.get(k):
+                params[k] = meta[k]
+        lst = await tb.get_json("/share/list", params)
+        if lst.get("errno") == 0:
+            files = lst.get("list") or files
         else:
-            trace.append(f"{host} shorturlinfo -> {_why(info)}")
+            trace.append(f"{host} share/list -> {_why(lst)}")
 
-        # 3) share list (signed if we have the info, anonymous otherwise)
-        if not any(f.get("dlink") for f in files):
-            params = {**common, "shorturl": short, "root": "1", "page": "1", "num": "100", "order": "asc"}
-            for k in ("shareid", "uk", "sign", "timestamp"):
-                if meta.get(k):
-                    params[k] = meta[k]
-            lst = await tb.get_json("/share/list", params)
-            if lst.get("errno") == 0:
-                files = lst.get("list") or files
+    # 4) open folders (one level)
+    expanded = []
+    for f in files:
+        if str(f.get("isdir", "0")) == "1" and f.get("path"):
+            expanded.extend(await _list_dir(tb, common, short, f["path"]))
+        else:
+            expanded.append(f)
+    files = [f for f in expanded if str(f.get("isdir", "0")) != "1"]
+    if not files:
+        trace.append(f"{host}: Terabox returned no files for this link")
+        return []
+
+    # 5) make sure each file has a download link
+    out = []
+    for f in files:
+        name = f.get("server_filename") or "video.mp4"
+        dl = f.get("dlink")
+        if not dl and meta.get("sign") and f.get("fs_id"):
+            params = {
+                **common,
+                "encrypt": "0",
+                "product": "share",
+                "sign": meta["sign"],
+                "timestamp": meta.get("timestamp", ""),
+                "shareid": meta.get("shareid", ""),
+                "primaryid": meta.get("shareid", ""),
+                "uk": meta.get("uk", ""),
+                "nozip": "0",
+                "fid_list": json.dumps([_to_int(f["fs_id"])]),
+            }
+            if meta.get("randsk"):
+                params["extra"] = json.dumps({"sekey": unquote(str(meta["randsk"]))}, separators=(",", ":"))
+            d = await tb.get_json("/share/download", params)
+            if d.get("errno") == 0:
+                dl = d.get("dlink")
+                if isinstance(dl, list):
+                    dl = dl[0].get("dlink") if dl and isinstance(dl[0], dict) else None
+                if not dl:
+                    items = d.get("list") or d.get("info") or []
+                    if items and isinstance(items[0], dict):
+                        dl = items[0].get("dlink")
             else:
-                trace.append(f"{host} share/list -> {_why(lst)}")
-
-        # 4) open folders (one level)
-        expanded = []
-        for f in files:
-            if str(f.get("isdir", "0")) == "1" and f.get("path"):
-                expanded.extend(await _list_dir(tb, common, short, f["path"]))
-            else:
-                expanded.append(f)
-        files = [f for f in expanded if str(f.get("isdir", "0")) != "1"]
-        if not files:
-            trace.append(f"{host}: Terabox returned no files for this link")
-            return []
-
-        # 5) make sure each file has a download link
-        out = []
-        for f in files:
-            name = f.get("server_filename") or "video.mp4"
-            dl = f.get("dlink")
-            if not dl and meta.get("sign") and f.get("fs_id"):
-                params = {
-                    **common,
-                    "encrypt": "0",
-                    "product": "share",
-                    "sign": meta["sign"],
-                    "timestamp": meta.get("timestamp", ""),
-                    "shareid": meta.get("shareid", ""),
-                    "primaryid": meta.get("shareid", ""),
-                    "uk": meta.get("uk", ""),
-                    "nozip": "0",
-                    "fid_list": json.dumps([_to_int(f["fs_id"])]),
-                }
-                if meta.get("randsk"):
-                    params["extra"] = json.dumps({"sekey": unquote(str(meta["randsk"]))}, separators=(",", ":"))
-                d = await tb.get_json("/share/download", params)
-                if d.get("errno") == 0:
-                    dl = d.get("dlink")
-                    if isinstance(dl, list):
-                        dl = dl[0].get("dlink") if dl and isinstance(dl[0], dict) else None
-                    if not dl:
-                        items = d.get("list") or d.get("info") or []
-                        if items and isinstance(items[0], dict):
-                            dl = items[0].get("dlink")
-                else:
-                    trace.append(f"{host} share/download -> {_why(d)}")
-            if not dl:
-                trace.append(f"{host}: found '{name}' ({_to_int(f.get('size'))} bytes) but Terabox gave no download link")
-                continue
-            out.append(FileInfo(name, _to_int(f.get("size")), dl, tb.headers()))
-        if not out and not any("account check" in t for t in trace):
-            trace.append(f"{host} account check -> {await _account_status(tb, common)}")
-        return out
+                trace.append(f"{host} share/download -> {_why(d)}")
+        if not dl:
+            trace.append(f"{host}: found '{name}' ({_to_int(f.get('size'))} bytes) but Terabox gave no download link")
+            continue
+        out.append(FileInfo(name, _to_int(f.get("size")), dl, tb.headers(with_ua=True)))
+    if not out and not any("account check" in t for t in trace):
+        trace.append(f"{host} account check -> {await _account_status(tb, common)}")
+    return out
 
 
 async def _from_scraper(link, trace):
