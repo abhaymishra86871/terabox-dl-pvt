@@ -84,7 +84,7 @@ async def process(app, job):
     try:
         files = await resolve(url)
     except Exception as e:  # noqa: BLE001
-        await status.set(f"❌ Could not read this link.\n{e}", force=True)
+        await status.set(f"❌ Could not read this link.\n{str(e)[:1500]}", force=True)
         return
 
     for i, info in enumerate(files, 1):
@@ -123,7 +123,7 @@ async def process(app, job):
                 await app.send_document(chat_id, path, caption=caption, progress=up_progress)
         except Exception as e:  # noqa: BLE001
             log.exception("job failed")
-            await app.send_message(chat_id, f"❌ Failed: {name}\n{e}")
+            await app.send_message(chat_id, f"❌ Failed: {name}\n{type(e).__name__}: {str(e)[:1500]}")
         finally:
             try:
                 os.remove(path)
