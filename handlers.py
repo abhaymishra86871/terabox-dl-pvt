@@ -3,7 +3,7 @@ import re
 from pyrogram import filters
 from pyrogram.handlers import MessageHandler
 
-from config import OWNER_ID
+from config import OWNER_IDS
 from jobs import enqueue, queue_length
 from resolver import check_cookie
 
@@ -14,7 +14,7 @@ DOMAINS = (
 )
 LINK_RE = re.compile(rf"https?://(?:[\w-]+\.)*(?:{DOMAINS})/\S+", re.I)
 
-owner_only = filters.user(OWNER_ID)
+owner_only = filters.user(OWNER_IDS)
 
 
 async def start_cmd(client, message):
