@@ -13,14 +13,17 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import aiohttp
 
-from config import RESOLVER_API_URL, TERABOX_COOKIE
+from config import RESOLVER_API_URL, TERABOX_COOKIE, TERABOX_HOST
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 )
 APP_ID = "250528"
-HOSTS = ["www.terabox.com", "www.1024terabox.com", "www.terabox.app"]
+# A cookie only works on the site it was created on, so the site matters.
+# Your cookie is from 1024terabox.com, so that one goes first.
+_DEFAULT_HOSTS = ["www.1024terabox.com", "www.terabox.com", "www.terabox.app"]
+HOSTS = list(dict.fromkeys(([TERABOX_HOST] if TERABOX_HOST else []) + _DEFAULT_HOSTS))
 
 ERRNO_HINTS = {
     400210: "Terabox asks for human verification (it often blocks server IPs like Render's)",
@@ -196,19 +199,24 @@ async def _account_status(tb, common):
 
 
 async def check_cookie():
-    """Used by the /check command: tells you if the cookie in Render works."""
+    """Used by the /check command: tests the cookie on every Terabox site."""
     if not TERABOX_COOKIE:
         return "❌ TERABOX_COOKIE is not set in Render."
     ck = _parse_cookie(TERABOX_COOKIE)
     ndus = ck.get("ndus", "")
     if not ndus:
         return f"❌ No 'ndus' value found. Cookie names seen: {', '.join(ck) or 'none'}"
-    timeout = aiohttp.ClientTimeout(total=30)
-    async with aiohttp.ClientSession(timeout=timeout, cookie_jar=aiohttp.DummyCookieJar()) as s:
-        tb = _Terabox("www.terabox.com", s)
-        common = {"app_id": APP_ID, "web": "1", "channel": "dubox", "clienttype": "0"}
-        status = await _account_status(tb, common)
-    return f"Cookie length: {len(ndus)} characters\nResult: {status}"
+    lines = [f"Cookie length: {len(ndus)} characters"]
+    common = {"app_id": APP_ID, "web": "1", "channel": "dubox", "clienttype": "0"}
+    for host in HOSTS:
+        try:
+            timeout = aiohttp.ClientTimeout(total=25)
+            async with aiohttp.ClientSession(timeout=timeout, cookie_jar=aiohttp.DummyCookieJar()) as s:
+                status = await _account_status(_Terabox(host, s), common)
+        except Exception as e:  # noqa: BLE001
+            status = f"⚠️ {type(e).__name__}: {e}"
+        lines.append(f"{host}: {status}")
+    return "\n".join(lines)
 
 
 async def _list_dir(tb, common, short, path):
